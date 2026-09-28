@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>401 繳款書產生器</title>
+<meta name="description" content="上傳稅金分攤 Excel 或手動輸入，一鍵向財政部 etax 產生多張 401 營業稅繳款書 PDF。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f6feb'/><text x='16' y='22' font-size='13' text-anchor='middle' fill='white' font-family='Arial' font-weight='700'>401</text></svg>">
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --ink: #1d2330; --muted: #6b7280; --line: #e3e6eb; --soft: #eef1f5;
+    --accent: #1f6feb; --accent-soft: #eef4ff; --accent-ink: #fff;
+    --ok: #1a7f37; --ok-bg: #e7f5ea; --warn: #9a6700; --warn-bg: #fff4d6; --bad: #cf222e; --bad-bg: #fde8ea;
+    --log-bg: #0f1420; --log-ink: #d7dde8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1218; --card: #171b23; --ink: #e6e9ef; --muted: #9aa3b2; --line: #2a303b; --soft: #222833;
+      --accent: #4c8dff; --accent-soft: #1a2640; --ok: #4ac26b; --ok-bg: #16301f; --warn: #d4a72c; --warn-bg: #33290f;
+      --bad: #ff7b72; --bad-bg: #3a1a1c; --log-bg: #0a0d13;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 "Microsoft JhengHei", "PingFang TC", "Noto Sans TC", system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  h2 .right { margin-left: auto; display: flex; gap: 8px; }
+  .step { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); color: var(--accent-ink); font-size: 13px; flex: none; }
+  .hint { color: var(--muted); font-size: 13px; font-weight: 400; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 8px;
+    padding: 6px 14px; cursor: pointer; }
+  button:hover { background: var(--soft); }
+  button.small { padding: 3px 10px; font-size: 13px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-size: 17px;
+    padding: 10px 26px; font-weight: 700; }
+  button.primary:hover { filter: brightness(1.08); background: var(--accent); }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  input[type=text], input[type=number], select, textarea {
+    font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--card); color: var(--ink); min-width: 0; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+  /* 公司清單 */
+  .co-list { display: grid; gap: 8px; }
+  .co-row { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; flex-wrap: wrap; }
+  .co-row b { font-size: 15px; }
+  .co-row .meta { color: var(--muted); font-size: 13px; }
+  .co-row .acts { margin-left: auto; display: flex; gap: 6px; }
+  .empty { padding: 16px; border: 2px dashed var(--line); border-radius: 10px; color: var(--muted); text-align: center; }
+
+  /* 匯入 */
+  #drop { border: 2px dashed var(--line); border-radius: 10px; padding: 22px; text-align: center; cursor: pointer; color: var(--muted); transition: .15s; }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+  #drop b { color: var(--ink); }
+  #importMsg { margin-top: 10px; font-size: 14px; }
+
+  /* 金額卡片 */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; margin-top: 14px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card.off { opacity: .45; }
+  .card-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .card-head label { font-weight: 700; font-size: 16px; display: flex; gap: 8px; align-items: center; }
+  .card-head small { color: var(--muted); font-weight: 400; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .row > span { width: 64px; color: var(--muted); font-size: 13px; flex: none; }
+  .row > input, .row > textarea { flex: 1; }
+  textarea { width: 100%; min-height: 190px; resize: vertical; font-family: Consolas, "Microsoft JhengHei", monospace; }
+  .split-bar { display: flex; gap: 6px; }
+  .split-bar select { font-size: 13px; padding: 3px 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip { font-size: 13px; padding: 2px 8px; border-radius: 999px; background: var(--soft); }
+  .chip.big { background: var(--warn-bg); color: var(--warn); }
+  .chip.dup { background: var(--bad-bg); color: var(--bad); }
+  .status { margin-top: 10px; font-size: 14px; padding: 6px 10px; border-radius: 8px; }
+  .status.ok { background: var(--ok-bg); color: var(--ok); }
+  .status.warn { background: var(--warn-bg); color: var(--warn); }
+  .status.bad { background: var(--bad-bg); color: var(--bad); }
+
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .progress { height: 8px; background: var(--soft); border-radius: 99px; overflow: hidden; margin: 14px 0 8px; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  pre#log { background: var(--log-bg); color: var(--log-ink); border-radius: 10px; padding: 12px 14px; height: 220px;
+    overflow: auto; font: 13px/1.5 Consolas, "Microsoft JhengHei", monospace; white-space: pre-wrap; margin: 0; }
+  #results { margin-top: 12px; display: grid; gap: 6px; }
+  .res { display: flex; gap: 10px; align-items: center; font-size: 14px; }
+  .res a { color: var(--accent); }
+  .res.fail { color: var(--bad); }
+
+  /* 公司設定 dialog */
+  dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(560px, calc(100vw - 32px));
+    background: var(--card); color: var(--ink); }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  .dlg-body { padding: 18px 20px; }
+  .dlg-body h3 { margin: 0 0 12px; font-size: 17px; }
+  .form { display: grid; grid-template-columns: 92px 1fr; gap: 10px 10px; align-items: center; }
+  .form label { color: var(--muted); font-size: 14px; }
+  .form .inline { display: flex; gap: 8px; }
+  .form .inline > * { flex: 1; }
+  .form .inline > button { flex: none; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--line); }
+  #dlgMsg { margin-top: 10px; font-size: 13px; min-height: 1.2em; }
+  .hidden { display: none !important; }
+
+  @media (max-width: 560px) {
+    section { padding: 14px; }
+    .form { grid-template-columns: 1fr; gap: 4px; }
+    .form label { margin-top: 6px; }
+    button.primary { width: 100%; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>401 營業稅繳款書產生器</h1>
+  <p class="sub">上傳稅金分攤 Excel，或手動輸入每張金額，一鍵向財政部 etax 產生每張 401 繳款書 PDF（檔名如「28500 甲公司.pdf」），一次打包下載。</p>
+
+  <section>
+    <h2><span class="step">1</span>公司設定
+      <span class="hint">只存在這台電腦的瀏覽器裡，不會上傳</span>
+      <span class="right">
+        <button class="small" id="exportCo" type="button">匯出設定</button>
+        <button class="small" id="importCoBtn" type="button">匯入設定</button>
+        <button class="small" id="addCo" type="button">＋ 新增公司</button>
+      </span>
+    </h2>
+    <input type="file" id="importCoFile" accept=".json" class="hidden">
+    <div class="co-list" id="coList"></div>
+  </section>
+
+  <section>
+    <h2><span class="step">2</span>金額
+      <span class="hint">上傳 Excel 自動帶入，或直接在下面輸入／按「自動拆」</span>
+      <span class="right"><button class="small" id="template" type="button">下載 Excel 範本</button></span>
+    </h2>
+    <div id="drop">把 <b>稅金分攤 Excel</b> 拖到這裡，或<b>點一下選檔案</b>
+      <div class="hint" style="margin-top:6px">格式：公司簡稱那格底下，第一格是應繳總額，再往下的負數是每一張的金額（遇到 =SUM 就停）</div>
+    </div>
+    <input type="file" id="xlsFile" accept=".xlsx,.xlsm,.xls" class="hidden">
+    <div id="importMsg"></div>
+    <div class="cards" id="cards"></div>
+  </section>
+
+  <section>
+    <h2><span class="step">3</span>所屬年月</h2>
+    <div class="actions">
+      <span><input type="number" id="year" style="width:90px" min="100" max="200"> 年</span>
+      <span><select id="period"></select> 月</span>
+      <span class="hint" id="periodHint"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="step">4</span>產生 PDF</h2>
+    <div class="actions">
+      <button class="primary" id="go" type="button">開始產生</button>
+      <button id="stop" type="button" class="hidden">停止</button>
+      <button id="zipAgain" type="button" class="hidden">再下載一次 ZIP</button>
+    </div>
+    <div class="progress"><div id="bar"></div></div>
+    <pre id="log">準備好了。</pre>
+    <div id="results"></div>
+  </section>
+
+  <p class="hint">PDF 由財政部 etax「自繳繳款書三段式條碼列印」產生，本頁只是幫你一次填好多張。產生繳款書不等於申報或繳款。</p>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="coForm">
+    <div class="dlg-body">
+      <h3 id="dlgTitle">新增公司</h3>
+      <div class="form">
+        <label for="f_ban">統一編號</label>
+        <div class="inline"><input type="text" id="f_ban" inputmode="numeric" maxlength="8" placeholder="8 碼"><button type="button" id="lookup">查詢</button></div>
+        <label for="f_name">營業人名稱</label><input type="text" id="f_name">
+        <label for="f_short">簡稱</label>
+        <input type="text" id="f_short" placeholder="用在檔名和 Excel 欄位名，例：甲公司">
+        <label for="f_owner">負責人</label><input type="text" id="f_owner">
+        <label for="f_addr">營業地址</label><input type="text" id="f_addr">
+        <label for="f_phone">電話</label><input type="text" id="f_phone" placeholder="選填">
+        <label for="f_hsn">縣市</label><select id="f_hsn"></select>
+        <label for="f_dst">稽徵單位</label><select id="f_dst"></select>
+        <label for="f_tax">稅籍編號</label>
+        <input type="text" id="f_tax" placeholder="申報書上的稅籍編號，例：D70 1234567 或 1234567">
+      </div>
+      <div id="dlgMsg" class="hint">輸入統編按「查詢」會自動帶出名稱、負責人、地址。<b>稽徵單位請對照申報書確認</b>，查詢帶出的不一定對。</div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" id="dlgCancel">取消</button>
+      <button type="submit" class="primary" style="font-size:15px;padding:6px 20px" id="dlgSave">儲存</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

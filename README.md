@@ -1,0 +1,53 @@
+# 401 營業稅繳款書產生器
+
+上傳稅金分攤 Excel，或手動輸入每張金額，一鍵向財政部 etax 產生多張 **401 營業稅繳款書 PDF**，打包成 ZIP 下載。
+每張 3 萬以下才能在超商繳，所以營業稅常要拆成好幾張，這個工具就是省掉一張一張填 etax 的時間。
+
+**網址：https://legstrong77-maker.github.io/tax-401-slips/**（任何電腦打開就能用，不用安裝）
+
+## 使用方式
+
+1. **公司設定**（每台電腦第一次）：按「＋ 新增公司」→ 輸入統編按「查詢」，名稱、負責人、地址會自動帶出
+   → **核對稽徵單位**（查詢帶出的不一定對，請對照申報書）→ 填稅籍編號 → 儲存。
+   也可以在已設定好的電腦按「匯出設定」，把 JSON 檔拿到別台電腦「匯入設定」。
+2. **金額**：把稅金分攤 Excel 拖進頁面；或在公司卡片填總額按「自動拆」（平均拆 / 29999 往下拆），也可以直接打每張金額。
+3. **所屬年月**：預設是最近一個已結束的雙月期。
+4. **開始產生** → 完成後自動下載 `115年07-08月_401繳款書.zip`，裡面是 `28500 甲公司.pdf` 這樣的檔名。
+
+逾期的期別 etax 會要求確認（會加徵滯納金），頁面會先問你。
+
+### Excel 格式
+
+```
+        甲公司     乙公司
+應繳    120000     45000     ← 公司簡稱底下第一個數字 = 應繳總額
+        -29900     -25000    ← 往下的負數 = 每一張的金額
+        -29800     -20000
+        ...        ...
+        =SUM(...)  =SUM(...) ← 遇到公式就停（=0 代表拆對了）
+```
+
+欄位標題要跟公司設定的「簡稱」或全名一樣。頁面上有「下載 Excel 範本」。
+
+## 架構
+
+```
+GitHub Pages（index.html + app.js，純前端）
+   │  fetch
+   ▼
+Cloudflare Worker  tax-401-proxy.legstrong77.workers.dev   ← worker/
+   │  轉送（etax 不接受跨網域呼叫，所以需要這一層）
+   ▼
+財政部 etax  /etwmain/api/functions/etw144w/{401, ETW144GetPulicInfo, ETW144GetHsn, ETW144GetDst}
+```
+
+- Worker 只轉送 etax 繳款書頁面本來就會呼叫的 4 個 API，只接受本網站（與 localhost）的 Origin，不記錄、不儲存任何資料。
+- 公司設定只存在各自瀏覽器的 localStorage，程式碼裡沒有任何公司資料。
+- Excel 在瀏覽器裡解析，不會上傳。
+
+## 維護
+
+- 重新部署 Worker：`cd worker && npx wrangler deploy`
+- etax 改版時要看的地方：`app.js` 的 `buildPayload()`（送出的欄位）與 `requestSlip()`（回應判斷）。
+  欄位可以在 etax 401 頁面開 DevTools → Network，按「確認送出」看 `api/functions/etw144w/401` 的 request body 對照。
+- 本機測試：`python -m http.server 8080` 後開 http://localhost:8080（Worker 允許 localhost）。
