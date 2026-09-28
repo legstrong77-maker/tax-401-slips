@@ -27,18 +27,29 @@ function loadCompanies() {
 function saveCompanies() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(companies)); } catch { /* 無痕模式存不了就算了 */ }
 }
+
+function missingFields(c) {
+  const m = [];
+  if (!c.name || !c.owner || !c.address) m.push('名稱/負責人/地址');
+  if (!/^\d{4}$/.test(c.dstCd || '')) m.push('稽徵單位');
+  if (!/^\d{7}$/.test(c.taxCode || '')) m.push('稅籍編號');
+  if (!c.hsnCd) m.push('縣市');
+  return m;
+}
 const safeShort = (s) => String(s).replace(/[\\/:*?"<>|]/g, '').trim();
 
 function renderCompanyList() {
   const box = $('#coList');
   if (!companies.length) {
-    box.innerHTML = `<div class="empty">還沒有公司。按右上角「＋ 新增公司」，輸入統編就能自動帶出資料；<br>或從別台電腦「匯出設定」再到這裡「匯入設定」。</div>`;
+    box.innerHTML = `<div class="empty">還沒有公司。直接在第 2 步上傳有對照表的 Excel 會自動建立；<br>或按右上角「＋ 新增公司」輸入統編，或從別台電腦「匯出設定」再到這裡「匯入設定」。</div>`;
   } else {
     box.innerHTML = companies.map((c, i) => `
       <div class="co-row">
         <b>${esc(c.short)}</b>
-        <span>${esc(c.name)}</span>
-        <span class="meta">統編 ${esc(c.ban)}　稽徵 ${esc(c.dstCd)} ${esc(c.dstLabel || '')}　稅籍 ${esc(c.taxCode)}</span>
+        <span>${esc(c.name || '')}</span>
+        <span class="meta">統編 ${esc(c.ban)}　${missingFields(c).length
+          ? `<span style="color:var(--warn)">還缺${esc(missingFields(c).join('、'))}（匯入 Excel 會自動帶入）</span>`
+          : `稽徵 ${esc(c.dstCd)} ${esc(c.dstLabel || '')}　稅籍 ${esc(c.taxCode)}`}</span>
         <span class="acts">
           <button class="small" type="button" data-edit="${i}">編輯</button>
           <button class="small danger" type="button" data-del="${i}">刪除</button>
@@ -250,9 +261,21 @@ function matchCompany(text) {
     companies.find((c) => t.includes(norm(c.short)) && t.length <= norm(c.short).length + 4) || null;
 }
 
+// 對照表：公司名底下依序是 稽徵單位代碼（4 碼）、稅籍編號（例 D70 1234567）、統編（8 碼，可省略）
+function readRef(ws, r, c) {
+  const at = (dr) => String(ws[XLSX.utils.encode_cell({ r: r + dr, c })]?.v ?? '').trim();
+  const dstCd = at(1);
+  const m = at(2).toUpperCase().replace(/\s+/g, '').match(/^([A-Z])(\d{2})(\d{7})$/);
+  if (!/^\d{4}$/.test(dstCd) || !m) return null;
+  const ban = at(3).replace(/\s+/g, '');
+  return { dstCd, hsnCd: m[1], taxPrefix: m[1] + m[2], taxCode: m[3], ...(/^\d{8}$/.test(ban) ? { ban } : {}) };
+}
+
 function parseWorkbook(buf) {
   const wb = XLSX.read(buf, { type: 'array', cellFormula: true });
   const best = {};
+  const refs = {};      // 已設定的公司：統編 → 對照表資料
+  const newCos = {};    // 還沒設定、但對照表有統編的公司：名稱 → 對照表資料
   const unknown = new Set();
   wb.SheetNames.forEach((sheetName, si) => {
     const ws = wb.Sheets[sheetName];
@@ -263,10 +286,13 @@ function parseWorkbook(buf) {
         const addr = XLSX.utils.encode_cell({ r, c });
         const cell = ws[addr];
         if (!cell || cell.t !== 's') continue;
+        const co = matchCompany(cell.v);
+        const ref = readRef(ws, r, c);
+        if (ref && co && !refs[co.ban]) refs[co.ban] = ref;
+        if (ref && !co && ref.ban && norm(cell.v).length <= 10) newCos[norm(cell.v)] = ref;
         const nums = readColumn(ws, range, r, c);
         if (!nums.length) continue;
         const { total, slips } = interpret(nums);
-        const co = matchCompany(cell.v);
         if (!co) {
           // 底下有拆單金額、但名字對不到任何公司 → 提醒使用者
           if (slips.length && norm(cell.v).length <= 10) unknown.add(norm(cell.v));
@@ -280,22 +306,97 @@ function parseWorkbook(buf) {
       }
     }
   });
-  return { found: Object.values(best), unknown: [...unknown] };
+  return { found: Object.values(best), refs, newCos, unknown: [...unknown] };
+}
+
+// 用 Excel 對照表補稽徵單位／稅籍編號；缺名稱、負責人、地址就用統編向 etax 查
+async function completeCompanies(refs, bans) {
+  const notes = [];
+  for (const co of companies) {
+    const ref = refs[co.ban];
+    if (!ref && !bans.includes(co.ban)) continue;
+    if (ref) {
+      if (ref.ban && ref.ban !== co.ban) notes.push(`${co.short}：Excel 對照表的統編 ${ref.ban} 跟設定的 ${co.ban} 不同，以設定為準`);
+      if (co.dstCd && co.taxCode && (co.dstCd !== ref.dstCd || co.taxCode !== ref.taxCode)) {
+        notes.push(`${co.short} 的稽徵單位／稅籍編號依 Excel 對照表更新為 ${ref.dstCd}／${ref.taxPrefix} ${ref.taxCode}`);
+      }
+      if (co.dstCd !== ref.dstCd) co.dstLabel = '';
+      const { ban, ...rest } = ref;
+      Object.assign(co, rest);
+    }
+    if (!co.name || !co.owner || !co.address) {
+      try {
+        const d = await api('/info?ban=' + co.ban);
+        const info = d.content?.[0];
+        if (d.isBusiness === 'Y' && info) {
+          co.name = info.banNm;
+          co.owner = info.respNm;
+          co.address = info.banAddr;
+        } else {
+          notes.push(`etax 查不到 ${co.short}（統編 ${co.ban}）的營業登記`);
+        }
+      } catch (e) {
+        notes.push(`${co.short} 公司資料查詢失敗：${e.message}`);
+      }
+    }
+    if (co.hsnCd && /^\d{4}$/.test(co.dstCd || '') && !co.dstLabel) {
+      try {
+        const d = (await api('/dst?hsn=' + co.hsnCd)).find((x) => x.dstCd === co.dstCd);
+        if (d) co.dstLabel = d.dstNm + (d.dstArea ? `[${d.dstArea}]` : '');
+      } catch { /* 只是顯示用 */ }
+    }
+  }
+  saveCompanies();
+  return notes;
+}
+
+// 檔名有「07-08」「115」之類就順便設定所屬年月
+function applyPeriodFromName(name) {
+  let changed = false;
+  // 用前瞻逐位置找，「115-07-08」才不會先吃掉「15-07」
+  for (const m of name.matchAll(/(?=(?<!\d)(\d{1,2})\s*[-~～_]\s*(\d{1,2})(?!\d))/g)) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a % 2 === 1 && b === a + 1 && b <= 12) {
+      $('#period').value = `${a}~${b}`;
+      changed = true;
+      break;
+    }
+  }
+  const y = name.match(/(?:^|\D)(1[0-4]\d)(?:\D|$)/);
+  if (y) { $('#year').value = y[1]; changed = true; }
+  if (changed) updatePeriodHint();
+  return changed;
 }
 
 async function importExcel(file) {
   const msg = $('#importMsg');
-  if (!companies.length) {
-    msg.innerHTML = '<span style="color:var(--bad)">請先在第 1 步設定公司（Excel 是用公司簡稱對欄位的）</span>';
-    return;
-  }
   try {
-    const { found, unknown } = parseWorkbook(await file.arrayBuffer());
+    msg.textContent = '讀取中…';
+    const buf = await file.arrayBuffer();
+    let parsed = parseWorkbook(buf);
+
+    // 對照表裡有統編、但還沒設定的公司 → 自動建立，再讀一次
+    const created = [];
+    for (const [short, ref] of Object.entries(parsed.newCos)) {
+      if (companies.some((c) => c.ban === ref.ban)) continue;
+      companies.push({ short: safeShort(short), ban: ref.ban });
+      created.push(short);
+    }
+    if (created.length) parsed = parseWorkbook(buf);
+
+    const { found, refs, unknown } = parsed;
     if (!found.length) {
-      msg.innerHTML = `<span style="color:var(--bad)">✗ 在 ${esc(file.name)} 裡找不到任何公司欄位（欄位標題要寫公司簡稱：${companies.map((c) => esc(c.short)).join('、')}）</span>`
-        + (unknown.length ? `<br><span class="hint">Excel 裡有這些名稱但還沒設定：${unknown.map(esc).join('、')}</span>` : '');
+      msg.innerHTML = companies.length
+        ? `<span style="color:var(--bad)">✗ 在 ${esc(file.name)} 裡找不到任何公司欄位（欄位標題要寫公司簡稱：${companies.map((c) => esc(c.short)).join('、')}）</span>`
+          + (unknown.length ? `<br><span class="hint">Excel 裡有這些名稱但還沒設定：${unknown.map(esc).join('、')}</span>` : '')
+        : '<span style="color:var(--bad)">✗ 還沒有公司設定，Excel 對照表裡也沒有統編。請在第 1 步新增公司，或在 Excel 對照表的稅籍編號下面加一行統編。</span>';
       return;
     }
+    const notes = await completeCompanies(refs, found.map((f) => f.ban));
+    if (created.length) notes.unshift(`已從 Excel 對照表自動建立公司：${created.join('、')}`);
+    renderCompanyList();
+    renderCards();
+    const periodSet = applyPeriodFromName(file.name);
     document.querySelectorAll('.card').forEach((el) => {
       const f = found.find((x) => x.ban === el.dataset.ban);
       el.querySelector('.use').checked = !!f;
@@ -307,6 +408,8 @@ async function importExcel(file) {
       return `${esc(co.short)}：總額 ${f.total.toLocaleString()}，${f.slips.length} 張（${esc(f.source)}）`;
     });
     msg.innerHTML = `<span style="color:var(--ok)">✓ 已匯入 ${esc(file.name)}</span><br><span class="hint">${lines.join('<br>')}</span>`
+      + (periodSet ? `<br><span class="hint">所屬年月已依檔名設為 ${esc($('#year').value)} 年 ${esc($('#period').value.replace('~', '～'))} 月</span>` : '')
+      + notes.map((n) => `<br><span style="color:var(--warn)">${esc(n)}</span>`).join('')
       + (unknown.length ? `<br><span style="color:var(--warn)">Excel 裡的「${unknown.map(esc).join('」「')}」還沒設定成公司，所以沒帶入</span>` : '');
     refresh();
   } catch (e) {
@@ -335,7 +438,18 @@ $('#template').addEventListener('click', () => {
     const col = XLSX.utils.encode_col(i + 1);
     ws[`${col}11`] = { t: 'n', f: `SUM(${col}2:${col}10)` };
   });
-  ws['!cols'] = [{ wch: 16 }, ...cos.map(() => ({ wch: 12 }))];
+  // 右邊的對照表：有了它，任何電腦上傳 Excel 就能自動建立公司，不用先設定
+  const refCol = cos.length + 3;
+  const put = (r, c, v) => { ws[XLSX.utils.encode_cell({ r, c })] = typeof v === 'number' ? { t: 'n', v } : { t: 's', v: String(v) }; };
+  ['對照表', '稽徵單位', '稅籍編號', '統編'].forEach((label, i) => put(i + 1, refCol - 1, label));
+  cos.forEach((c, i) => {
+    put(1, refCol + i, c.short);
+    if (c.dstCd) put(2, refCol + i, Number(c.dstCd));
+    if (c.taxCode) put(3, refCol + i, `${c.taxPrefix || (c.hsnCd || '') + (c.dstCd || '').slice(0, 2)} ${c.taxCode}`);
+    if (c.ban) put(4, refCol + i, c.ban);
+  });
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: 10, c: refCol + cos.length - 1 } });
+  ws['!cols'] = [{ wch: 16 }, ...cos.map(() => ({ wch: 12 })), { wch: 4 }, { wch: 10 }, ...cos.map(() => ({ wch: 14 }))];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '稅金分攤');
   XLSX.writeFile(wb, '稅金分攤-範本.xlsx');
@@ -430,7 +544,10 @@ function cardState(el) {
   const big = nums.filter((n) => n > MAX_SLIP);
 
   let level = 'ok', msg;
-  if (!nums.length) { level = 'warn'; msg = total ? '按「自動拆」或自己輸入每張金額' : '還沒有金額'; }
+  const missing = missingFields(co);
+  if (nums.length && missing.length) {
+    level = 'bad'; msg = `公司資料還缺${missing.join('、')}：上傳有對照表的 Excel，或在第 1 步按「編輯」補上`;
+  } else if (!nums.length) { level = 'warn'; msg = total ? '按「自動拆」或自己輸入每張金額' : '還沒有金額'; }
   else if (bad.length) { level = 'bad'; msg = `看不懂：${bad.join('、')}`; }
   else if (dups.length) { level = 'bad'; msg = `金額重複（${[...new Set(dups)].join('、')}），檔名會撞在一起`; }
   else if (total != null && (!Number.isFinite(total) || sum !== total)) {
