@@ -276,6 +276,7 @@ function parseWorkbook(buf) {
   const best = {};
   const refs = {};      // 已設定的公司：統編 → 對照表資料
   const newCos = {};    // 還沒設定、但對照表有統編的公司：名稱 → 對照表資料
+  const needBan = {};   // 還沒設定、對照表缺統編的公司：名稱 → 對照表資料
   const unknown = new Set();
   wb.SheetNames.forEach((sheetName, si) => {
     const ws = wb.Sheets[sheetName];
@@ -289,7 +290,7 @@ function parseWorkbook(buf) {
         const co = matchCompany(cell.v);
         const ref = readRef(ws, r, c);
         if (ref && co && !refs[co.ban]) refs[co.ban] = ref;
-        if (ref && !co && ref.ban && norm(cell.v).length <= 10) newCos[norm(cell.v)] = ref;
+        if (ref && !co && norm(cell.v).length <= 10) (ref.ban ? newCos : needBan)[norm(cell.v)] = ref;
         const nums = readColumn(ws, range, r, c);
         if (!nums.length) continue;
         const { total, slips } = interpret(nums);
@@ -306,7 +307,7 @@ function parseWorkbook(buf) {
       }
     }
   });
-  return { found: Object.values(best), refs, newCos, unknown: [...unknown] };
+  return { found: Object.values(best), refs, newCos, needBan, unknown: [...unknown] };
 }
 
 // 用 Excel 對照表補稽徵單位／稅籍編號；缺名稱、負責人、地址就用統編向 etax 查
@@ -384,6 +385,23 @@ async function importExcel(file) {
     }
     if (created.length) parsed = parseWorkbook(buf);
 
+    // 對照表缺統編 → 當場請使用者輸入一次（記在這台電腦），再重新匯入
+    const ask = Object.keys(parsed.needBan);
+    if (ask.length) {
+      msg.innerHTML = `<div class="status warn">Excel 對照表裡有「${ask.map(esc).join('」「')}」，但沒有統編。輸入一次，這台電腦之後就會記住：`
+        + ask.map((n, i) => `<div class="row" style="margin:8px 0 0"><span>${esc(n)}</span><input type="text" inputmode="numeric" maxlength="8" placeholder="8 碼統編" data-ask="${i}" style="max-width:160px"></div>`).join('')
+        + `<div style="margin-top:8px"><button type="button" id="askGo">繼續</button> <span class="hint">（或在 Excel 對照表稅籍編號下面加一行統編，就不用再輸入）</span></div></div>`;
+      $('#askGo').addEventListener('click', () => {
+        const bans = ask.map((_, i) => msg.querySelector(`[data-ask="${i}"]`).value.trim());
+        if (bans.some((b) => !/^\d{8}$/.test(b))) { alert('統編要 8 碼數字'); return; }
+        ask.forEach((n, i) => { if (!companies.some((c) => c.ban === bans[i])) companies.push({ short: safeShort(n), ban: bans[i] }); });
+        saveCompanies();
+        importExcel(file);
+      });
+      msg.querySelector('[data-ask="0"]').focus();
+      return;
+    }
+
     const { found, refs, unknown } = parsed;
     if (!found.length) {
       msg.innerHTML = companies.length
@@ -412,6 +430,8 @@ async function importExcel(file) {
       + notes.map((n) => `<br><span style="color:var(--warn)">${esc(n)}</span>`).join('')
       + (unknown.length ? `<br><span style="color:var(--warn)">Excel 裡的「${unknown.map(esc).join('」「')}」還沒設定成公司，所以沒帶入</span>` : '');
     refresh();
+    // 金額都沒問題就直接開始（startGenerate 會先跳確認年月與張數）
+    if (!$('#go').disabled) startGenerate();
   } catch (e) {
     msg.innerHTML = `<span style="color:var(--bad)">✗ 讀不懂這個檔案：${esc(e.message)}</span>`;
   }
@@ -665,7 +685,10 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
 }
 
-$('#go').addEventListener('click', async () => {
+$('#go').addEventListener('click', () => startGenerate());
+
+async function startGenerate() {
+  if (running) return;
   const jobs = [];
   document.querySelectorAll('.card').forEach((el) => {
     const s = cardState(el);
@@ -673,7 +696,11 @@ $('#go').addEventListener('click', async () => {
   });
   const { year, endMonth, label } = periodInfo();
   if (!year || year < 100) { alert('年度不對'); return; }
-  if (!confirm(`要向 etax 產生「${label}」的 401 繳款書，共 ${jobs.length} 張？`)) return;
+  const perCo = {};
+  jobs.forEach((j) => { perCo[j.co.short] = (perCo[j.co.short] || 0) + 1; });
+  if (!confirm(`要向 etax 產生「${label}」的 401 繳款書？\n\n`
+    + Object.entries(perCo).map(([k, v]) => `${k}：${v} 張`).join('\n')
+    + `\n共 ${jobs.length} 張\n\n（年月不對請按取消，到第 3 步改好再按「開始產生」）`)) return;
 
   running = true; cancel = false; refresh();
   $('#stop').classList.remove('hidden');
@@ -746,7 +773,7 @@ $('#go').addEventListener('click', async () => {
     downloadBlob(lastZip.blob, lastZip.name);
     $('#zipAgain').classList.remove('hidden');
   }
-});
+}
 
 $('#stop').addEventListener('click', () => { cancel = true; log('（收到停止，這張做完就停）'); });
 $('#zipAgain').addEventListener('click', () => lastZip && downloadBlob(lastZip.blob, lastZip.name));
