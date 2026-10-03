@@ -233,16 +233,17 @@ function loadSetupFromHash() {
   history.replaceState(null, '', location.pathname + location.search);
   try {
     const list = JSON.parse(fromB64Url(m[1]));
-    let added = 0, updated = 0;
+    const loaded = [];
     for (const raw of Array.isArray(list) ? list : []) {
       const c = Object.fromEntries(CO_FIELDS.map((k) => [k, String(raw?.[k] ?? '').trim()]));
       c.short = safeShort(c.short);
       if (!/^\d{8}$/.test(c.ban) || !c.short || missingFields(c).length) continue;
       const i = companies.findIndex((x) => x.ban === c.ban);
-      if (i >= 0) { companies[i] = c; updated++; } else { companies.push(c); added++; }
+      if (i >= 0) companies[i] = c; else companies.push(c);
+      loaded.push(c.short);
     }
     saveCompanies();
-    $('#coMsg').innerHTML = `<div class="status ok" style="margin-bottom:10px">✓ 已從設定連結載入公司（新增 ${added} 家、更新 ${updated} 家），這台電腦之後都會記住</div>`;
+    $('#coMsg').innerHTML = `<div class="status ok" style="margin-bottom:10px">✓ 已載入預設公司：${loaded.map(esc).join('、')}</div>`;
   } catch {
     $('#coMsg').innerHTML = '<div class="status bad" style="margin-bottom:10px">設定連結不完整，請重新複製一次</div>';
   }
