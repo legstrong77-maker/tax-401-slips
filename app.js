@@ -250,25 +250,28 @@ function loadSetupFromHash() {
 }
 window.addEventListener('hashchange', () => { loadSetupFromHash(); renderAll(); });
 
+// 讀公司設定檔（「匯出設定」產生的 .json），回傳載入的公司簡稱
+async function importSettings(file) {
+  const d = JSON.parse(await file.text());
+  const list = Array.isArray(d) ? d : d.companies;
+  const loaded = [];
+  for (const raw of list || []) {
+    const c = Object.fromEntries(CO_FIELDS.map((k) => [k, String(raw?.[k] ?? '').trim()]));
+    c.short = safeShort(c.short);
+    if (!/^\d{8}$/.test(c.ban) || !c.short) continue;
+    const i = companies.findIndex((x) => x.ban === c.ban);
+    if (i >= 0) companies[i] = c; else companies.push(c);
+    loaded.push(c.short);
+  }
+  if (!loaded.length) throw new Error('裡面沒有公司資料');
+  saveCompanies();
+  return loaded;
+}
+
 $('#importCoFile').addEventListener('change', async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
-  if (!f) return;
-  try {
-    const d = JSON.parse(await f.text());
-    const list = Array.isArray(d) ? d : d.companies;
-    let added = 0, updated = 0;
-    for (const c of list || []) {
-      if (!/^\d{8}$/.test(c.ban) || !c.short || !c.taxCode || !c.dstCd) continue;
-      const i = companies.findIndex((x) => x.ban === c.ban);
-      if (i >= 0) { companies[i] = c; updated++; } else { companies.push(c); added++; }
-    }
-    saveCompanies();
-    renderAll();
-    alert(`匯入完成：新增 ${added} 家、更新 ${updated} 家`);
-  } catch (err) {
-    alert('讀不懂這個設定檔：' + err.message);
-  }
+  if (f) await handleFiles([f]);
 });
 
 /* ================= Excel ================= */
@@ -489,15 +492,41 @@ async function importExcel(file) {
   }
 }
 
+// 可以一次丟「公司設定檔 .json ＋ 稅金分攤 Excel」：先載入公司，再匯入 Excel
+async function handleFiles(fileList) {
+  const files = [...fileList];
+  const settings = files.filter((f) => /\.json$/i.test(f.name));
+  const excels = files.filter((f) => /\.xls[xm]?$/i.test(f.name));
+  const others = files.filter((f) => !settings.includes(f) && !excels.includes(f));
+  for (const f of settings) {
+    try {
+      const names = await importSettings(f);
+      $('#coMsg').innerHTML = `<div class="status ok" style="margin-bottom:10px">✓ 已從「${esc(f.name)}」載入公司：${names.map(esc).join('、')}</div>`;
+    } catch (err) {
+      $('#coMsg').innerHTML = `<div class="status bad" style="margin-bottom:10px">✗ 設定檔「${esc(f.name)}」讀不懂：${esc(err.message)}</div>`;
+    }
+  }
+  if (settings.length) renderAll();
+  if (others.length) {
+    $('#importMsg').innerHTML = `<span style="color:var(--bad)">✗ 不認得：${others.map((f) => esc(f.name)).join('、')}（只收 Excel 和 .json 公司設定檔）</span>`;
+  }
+  if (excels.length > 1) alert(`一次只能匯入一個 Excel，先用「${excels[0].name}」`);
+  if (excels.length) await importExcel(excels[0]);
+}
+
 const drop = $('#drop');
 drop.addEventListener('click', () => $('#xlsFile').click());
-$('#xlsFile').addEventListener('change', (e) => { if (e.target.files[0]) importExcel(e.target.files[0]); e.target.value = ''; });
+$('#xlsFile').addEventListener('change', async (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  if (files.length) await handleFiles(files);
+});
 drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', (e) => {
   e.preventDefault();
   drop.classList.remove('over');
-  if (e.dataTransfer.files[0]) importExcel(e.dataTransfer.files[0]);
+  if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
 });
 
 $('#template').addEventListener('click', () => {

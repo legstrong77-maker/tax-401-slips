@@ -139,10 +139,10 @@
       <span class="hint">上傳 Excel 自動帶入，或直接在下面輸入／按「自動拆」</span>
       <span class="right"><button class="small" id="template" type="button">下載 Excel 範本</button></span>
     </h2>
-    <div id="drop">把 <b>稅金分攤 Excel</b> 拖到這裡，或<b>點一下選檔案</b>
+    <div id="drop">把 <b>稅金分攤 Excel</b>（可連同<b>公司設定檔 .json</b> 一起）拖到這裡，或<b>點一下選檔案</b>
       <div class="hint" style="margin-top:6px">格式：公司簡稱那格底下，第一格是應繳總額，再往下的負數是每一張的金額（遇到 =SUM 就停）</div>
     </div>
-    <input type="file" id="xlsFile" accept=".xlsx,.xlsm,.xls" class="hidden">
+    <input type="file" id="xlsFile" accept=".xlsx,.xlsm,.xls,.json" multiple class="hidden">
     <div id="importMsg"></div>
     <div class="cards" id="cards"></div>
   </section>
