@@ -123,12 +123,14 @@
     <h2><span class="step">1</span>公司設定
       <span class="hint">只存在這台電腦的瀏覽器裡。Excel 右邊有對照表（稽徵單位、稅籍編號、統編）的話，上傳時會自動建立，不用先設定</span>
       <span class="right">
+        <button class="small" id="copyLink" type="button">複製設定連結</button>
         <button class="small" id="exportCo" type="button">匯出設定</button>
         <button class="small" id="importCoBtn" type="button">匯入設定</button>
         <button class="small" id="addCo" type="button">＋ 新增公司</button>
       </span>
     </h2>
     <input type="file" id="importCoFile" accept=".json" class="hidden">
+    <div id="coMsg"></div>
     <div class="co-list" id="coList"></div>
   </section>
 

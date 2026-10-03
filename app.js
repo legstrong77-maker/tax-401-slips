@@ -70,10 +70,22 @@ function renderCompanyList() {
 let editingIndex = -1;
 let hsnList = null;
 
+// etax 停機時回的是一張「網站維護中」網頁，抓出維護時間給使用者看
+function etaxDownMessage(text) {
+  if (!/維護|Maintenance|503\.html/i.test(text)) return null;
+  const plain = text.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const when = plain.match(/本網站於[^。]*?(?=，|。)/);
+  return '財政部 etax 網站維護中' + (when ? `（${when[0]}）` : '') + '，請等維護結束再試';
+}
+
 async function api(path) {
   const r = await fetch(PROXY + path);
-  if (!r.ok) throw new Error(`中繼站回應 ${r.status}`);
-  return r.json();
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(etaxDownMessage(text) || `中繼站回應不是資料（HTTP ${r.status}）`);
+  }
 }
 
 async function ensureHsn() {
@@ -198,6 +210,45 @@ $('#exportCo').addEventListener('click', () => {
   downloadBlob(new Blob([JSON.stringify({ version: 1, companies }, null, 2)], { type: 'application/json' }), '401繳款書-公司設定.json');
 });
 $('#importCoBtn').addEventListener('click', () => $('#importCoFile').click());
+/* ---------- 設定連結：公司設定放在網址 # 後面，點開就載入（# 後面不會送到任何伺服器） ---------- */
+const toB64Url = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const fromB64Url = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0)));
+const CO_FIELDS = ['ban', 'short', 'name', 'owner', 'address', 'phone', 'hsnCd', 'dstCd', 'dstLabel', 'taxPrefix', 'taxCode'];
+
+$('#copyLink').addEventListener('click', async () => {
+  const list = companies.filter((c) => !missingFields(c).length);
+  if (!list.length) { alert('還沒有資料完整的公司可以分享'); return; }
+  const link = location.origin + location.pathname + '#setup=' + toB64Url(JSON.stringify(list));
+  try {
+    await navigator.clipboard.writeText(link);
+    alert(`已複製 ${list.length} 家公司的設定連結。\n在別台電腦打開這個連結，公司就設定好了。\n（連結裡有公司資料，只傳給自己人）`);
+  } catch {
+    prompt('複製這個設定連結：', link);
+  }
+});
+
+function loadSetupFromHash() {
+  const m = location.hash.match(/^#setup=([A-Za-z0-9_-]+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    const list = JSON.parse(fromB64Url(m[1]));
+    let added = 0, updated = 0;
+    for (const raw of Array.isArray(list) ? list : []) {
+      const c = Object.fromEntries(CO_FIELDS.map((k) => [k, String(raw?.[k] ?? '').trim()]));
+      c.short = safeShort(c.short);
+      if (!/^\d{8}$/.test(c.ban) || !c.short || missingFields(c).length) continue;
+      const i = companies.findIndex((x) => x.ban === c.ban);
+      if (i >= 0) { companies[i] = c; updated++; } else { companies.push(c); added++; }
+    }
+    saveCompanies();
+    $('#coMsg').innerHTML = `<div class="status ok" style="margin-bottom:10px">✓ 已從設定連結載入公司（新增 ${added} 家、更新 ${updated} 家），這台電腦之後都會記住</div>`;
+  } catch {
+    $('#coMsg').innerHTML = '<div class="status bad" style="margin-bottom:10px">設定連結不完整，請重新複製一次</div>';
+  }
+}
+window.addEventListener('hashchange', () => { loadSetupFromHash(); renderAll(); });
+
 $('#importCoFile').addEventListener('change', async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -337,7 +388,7 @@ async function completeCompanies(refs, bans) {
           notes.push(`etax 查不到 ${co.short}（統編 ${co.ban}）的營業登記`);
         }
       } catch (e) {
-        notes.push(`${co.short} 公司資料查詢失敗：${e.message}`);
+        notes.push(/維護中/.test(e.message) ? `${e.message}。公司資料查不到，維護結束後再拖一次 Excel 就好` : `${co.short} 公司資料查詢失敗：${e.message}`);
       }
     }
     if (co.hsnCd && /^\d{4}$/.test(co.dstCd || '') && !co.dstLabel) {
@@ -348,7 +399,7 @@ async function completeCompanies(refs, bans) {
     }
   }
   saveCompanies();
-  return notes;
+  return [...new Set(notes)];
 }
 
 // 檔名有「07-08」「115」之類就順便設定所屬年月
@@ -661,8 +712,12 @@ async function requestSlip(payload) {
   const buf = await r.arrayBuffer();
   const head = new TextDecoder().decode(buf.slice(0, 5));
   if (head.startsWith('%PDF')) return { pdf: new Blob([buf], { type: 'application/pdf' }) };
+  const text = new TextDecoder().decode(buf);
   let j = null;
-  try { j = JSON.parse(new TextDecoder().decode(buf)); } catch { /* 不是 JSON */ }
+  try { j = JSON.parse(text); } catch {
+    const down = etaxDownMessage(text);
+    if (down) return { error: down, fatal: true };
+  }
   const details = j?.error?.details || [];
   if (details.some((d) => String(d.objectName).startsWith('overDate'))) return { overdue: true };
   const msg = details.map((d) => d.message).filter(Boolean).join('；') || j?.error?.message || `HTTP ${r.status}`;
@@ -746,6 +801,7 @@ async function startGenerate() {
     } else {
       failed.push({ name, error: res?.error || '未知錯誤' });
       log(`  ✗ ${name}：${res?.error}`);
+      if (res?.fatal) { cancel = true; log('■ etax 無法使用，整批停止'); }
     }
     $('#bar').style.width = `${((i + 1) / jobs.length) * 100}%`;
     if (i < jobs.length - 1 && !cancel) await sleep(600);
@@ -794,5 +850,6 @@ function renderAll() {
   $('#year').addEventListener('input', updatePeriodHint);
   sel.addEventListener('change', updatePeriodHint);
   updatePeriodHint();
+  loadSetupFromHash();
   renderAll();
 })();
